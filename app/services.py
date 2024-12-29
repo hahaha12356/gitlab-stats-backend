@@ -11,14 +11,17 @@ class GitLabStatsService:
     def collect_stats(self, group_id, start_date, end_date):
         """收集统计数据"""
         projects = self.client.get_group_projects(group_id)
+        logger.info(f"Found {len(projects)} total projects in group {group_id}")
+        
         stats = {
             'total_commits': 0,
             'total_merge_requests': 0,
-            'total_projects': 0,  # 新增：项目总数
+            'total_projects': len(projects),  # 记录总项目数
+            'processed_projects': 0,          # 新增：成功处理的项目数
             'projects': [],
             'skipped_projects': [],
             'partial_data_projects': [],
-            'contributors': defaultdict(lambda: {  # 新增：全局贡献者统计
+            'contributors': defaultdict(lambda: {
                 'commits': 0,
                 'merge_requests': 0
             })
@@ -26,11 +29,14 @@ class GitLabStatsService:
         
         for project in projects:
             project_id = project['id']
-            if project_id == 174:  # 跳过已知有问题的项目
-                logger.warning(f"Skipping project ID 174 ({project.get('name', 'Unknown')})")
+            project_name = project.get('name', 'Unknown')
+            logger.info(f"Processing project {project_name} (ID: {project_id})")
+            
+            if project_id == 174:
+                logger.warning(f"Skipping project ID 174 ({project_name})")
                 stats['skipped_projects'].append({
                     'id': project_id,
-                    'name': project.get('name', 'Unknown'),
+                    'name': project_name,
                     'reason': 'Project ID temporarily excluded'
                 })
                 continue
@@ -60,25 +66,40 @@ class GitLabStatsService:
                     stats['contributors'][author]['merge_requests'] += contributor_stats['merge_requests']
                 
                 if project_stats.get('errors'):
+                    logger.warning(f"Partial data for project {project_name}: {project_stats['errors']}")
                     stats['partial_data_projects'].append({
                         'id': project_id,
-                        'name': project.get('name', 'Unknown'),
+                        'name': project_name,
                         'errors': project_stats['errors']
                     })
                 
                 stats['total_commits'] += project_stats['commit_count']
                 stats['total_merge_requests'] += project_stats['merge_request_count']
                 stats['projects'].append(formatted_stats)
-                stats['total_projects'] += 1  # 增加项目计数
+                stats['processed_projects'] += 1
+                
+                logger.info(f"Successfully processed project {project_name} - "
+                           f"Commits: {project_stats['commit_count']}, "
+                           f"MRs: {project_stats['merge_request_count']}")
                 
             except Exception as e:
-                logger.error(f"Error collecting stats for project {project_id}: {str(e)}")
+                logger.error(f"Error collecting stats for project {project_name}: {str(e)}")
                 stats['skipped_projects'].append({
                     'id': project_id,
-                    'name': project.get('name', 'Unknown'),
+                    'name': project_name,
                     'reason': str(e)
                 })
                 continue
+        
+        # 添加统计摘要
+        stats['summary'] = {
+            'total_projects': stats['total_projects'],
+            'processed_projects': stats['processed_projects'],
+            'skipped_projects': len(stats['skipped_projects']),
+            'partial_data_projects': len(stats['partial_data_projects'])
+        }
+        
+        logger.info(f"Statistics collection completed: {stats['summary']}")
         
         # 将defaultdict转换为普通dict
         stats['contributors'] = dict(stats['contributors'])

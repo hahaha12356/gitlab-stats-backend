@@ -70,32 +70,96 @@ class GitLabClient:
             raise
     
     def get_group_projects(self, group_id):
+        """获取组内所有项目
+        
+        Args:
+            group_id: 组ID
+        """
         url = f"{self.base_url}/api/v4/groups/{group_id}/projects"
-        logger.debug(f"Requesting projects for group {group_id} from: {url}")
-        response = self.session.get(
-            url, 
-            headers=self.headers,
-            **self.request_kwargs
-        )
+        params = {'per_page': 100}  # 增加每页数量
         
-        # 打印响应状态和内容以便调试
-        logger.debug(f"Response status: {response.status_code}")
-        logger.debug(f"Response content: {response.text}")
+        logger.info(f"Fetching projects for group {group_id}")
         
-        # 检查响应状态
-        response.raise_for_status()
+        all_projects = []
+        page = 1
         
-        try:
-            return response.json()
-        except ValueError as e:
-            logger.error(f"Failed to parse JSON response: {e}")
-            logger.error(f"Response content: {response.text}")
-            raise
+        while True:
+            try:
+                params['page'] = page
+                logger.debug(f"Fetching page {page} of projects")
+                
+                response = self.session.get(
+                    url,
+                    headers=self.headers,
+                    params=params,
+                    **self.request_kwargs
+                )
+                response.raise_for_status()
+                
+                projects = response.json()
+                if not projects:
+                    break
+                    
+                all_projects.extend(projects)
+                logger.debug(f"Found {len(projects)} projects on page {page}")
+                
+                # 检查是否有下一页
+                if 'next' not in response.links:
+                    break
+                    
+                page += 1
+                
+            except Exception as e:
+                logger.error(f"Error fetching projects page {page}: {str(e)}")
+                break
+        
+        logger.info(f"Total projects found: {len(all_projects)}")
+        return all_projects
+    
+    def get_project_branches(self, project_id):
+        """获取项目的所有分支"""
+        url = f"{self.base_url}/api/v4/projects/{project_id}/repository/branches"
+        params = {'per_page': 100}
+        
+        all_branches = []
+        page = 1
+        
+        while True:
+            try:
+                params['page'] = page
+                logger.debug(f"Fetching branches page {page} for project {project_id}")
+                
+                response = self.session.get(
+                    url,
+                    headers=self.headers,
+                    params=params,
+                    **self.request_kwargs
+                )
+                response.raise_for_status()
+                
+                branches = response.json()
+                if not branches:
+                    break
+                    
+                all_branches.extend(branches)
+                logger.debug(f"Found {len(branches)} branches on page {page}")
+                
+                if 'next' not in response.links:
+                    break
+                    
+                page += 1
+                
+            except Exception as e:
+                logger.error(f"Error fetching branches page {page}: {str(e)}")
+                break
+        
+        logger.info(f"Total branches found for project {project_id}: {len(all_branches)}")
+        return all_branches
     
     def get_project_commits(self, project_id, since=None, until=None):
-        """获取项目的commits"""
-        # 首先验证项目是否存在
+        """获取项目所有分支的commits"""
         try:
+            # 验证项目存在
             project_url = f"{self.base_url}/api/v4/projects/{project_id}"
             logger.debug(f"Verifying project existence: {project_url}")
             
@@ -113,58 +177,125 @@ class GitLabClient:
             project_info = response.json()
             logger.debug(f"Found project: {project_info.get('name', 'Unknown')}")
 
-            # 尝试不同的API路径
-            api_paths = [
-                f"/api/v4/projects/{project_id}/repository/commits",  # 尝试repository路径
-                f"/api/v4/projects/{project_id}/commits"             # 原始路径
+            # 获取所有分支
+            branches = self.get_project_branches(project_id)
+            all_commits = set()  # 使用集合去重
+            
+            for branch in branches:
+                branch_name = branch['name']
+                logger.debug(f"Fetching commits for branch: {branch_name}")
+                
+                page = 1
+                while True:
+                    try:
+                        url = f"{self.base_url}/api/v4/projects/{project_id}/repository/commits"
+                        params = {
+                            'ref_name': branch_name,
+                            'per_page': 100,
+                            'page': page
+                        }
+                        
+                        if since:
+                            params['since'] = since
+                        if until:
+                            params['until'] = until
+
+                        logger.debug(f"Requesting commits from branch {branch_name} (page {page})")
+                        response = self.session.get(
+                            url,
+                            headers=self.headers,
+                            params=params,
+                            **self.request_kwargs
+                        )
+                        
+                        if response.status_code == 200:
+                            commits = response.json()
+                            if not commits:
+                                break
+                                
+                            # 使用commit id作为唯一标识添加到集合中
+                            for commit in commits:
+                                commit_tuple = (
+                                    commit['id'],
+                                    commit['author_name'],
+                                    commit['authored_date'],
+                                    commit['title']
+                                )
+                                all_commits.add(commit_tuple)
+                                
+                            logger.debug(f"Found {len(commits)} commits on page {page} for branch {branch_name}")
+                            
+                            if 'next' not in response.links:
+                                break
+                                
+                            page += 1
+                        else:
+                            logger.warning(f"Failed to get commits for branch {branch_name}: {response.status_code}")
+                            break
+                            
+                    except Exception as e:
+                        logger.error(f"Error fetching commits for branch {branch_name} page {page}: {str(e)}")
+                        break
+            
+            # 转换回列表格式，并重建完整的commit对象
+            commits_list = [
+                {
+                    'id': commit_id,
+                    'author_name': author_name,
+                    'authored_date': authored_date,
+                    'title': title
+                }
+                for commit_id, author_name, authored_date, title in all_commits
             ]
             
-            last_error = None
-            for path in api_paths:
-                try:
-                    url = f"{self.base_url}{path}"
-                    params = {}
-                    if since:
-                        params['since'] = since
-                    if until:
-                        params['until'] = until
-
-                    logger.debug(f"Trying commits API path: {url}")
-                    response = self.session.get(
-                        url,
-                        headers=self.headers,
-                        params=params,
-                        **self.request_kwargs
-                    )
-                    
-                    if response.status_code == 200:
-                        return response.json()
-                        
-                except Exception as e:
-                    last_error = e
-                    continue
-                
-            # 如果所有路径都失败
-            raise Exception(f"Unable to get commits using any available API path: {str(last_error)}")
+            logger.info(f"Total unique commits found across all branches: {len(commits_list)}")
+            return commits_list
 
         except Exception as e:
             logger.error(f"Error in get_project_commits: {str(e)}")
             raise
     
-    def get_project_merge_requests(self, project_id, state='merged', since=None, until=None):
+    def get_project_merge_requests(self, project_id, state='all', since=None, until=None):
+        """获取项目的merge requests"""
         url = f"{self.base_url}/api/v4/projects/{project_id}/merge_requests"
-        params = {'state': state}
+        params = {'state': state, 'per_page': 100}
         if since:
             params['created_after'] = since
         if until:
             params['created_before'] = until
-            
+        
         logger.debug(f"Requesting merge requests from: {url} with params: {params}")
-        response = self.session.get(
-            url, 
-            headers=self.headers, 
-            params=params,
-            **self.request_kwargs
-        )
-        response.raise_for_status()
-        return response.json() 
+        
+        all_merge_requests = []
+        page = 1
+        
+        while True:
+            try:
+                params['page'] = page
+                # 移除额外的timeout参数，使用request_kwargs中的设置
+                response = self.session.get(
+                    url, 
+                    headers=self.headers, 
+                    params=params,
+                    **self.request_kwargs
+                )
+                response.raise_for_status()
+                
+                merge_requests = response.json()
+                if not merge_requests:
+                    break
+                    
+                all_merge_requests.extend(merge_requests)
+                logger.debug(f"Found {len(merge_requests)} merge requests on page {page}")
+                
+                if 'next' not in response.links:
+                    break
+                    
+                page += 1
+                
+            except Exception as e:
+                logger.error(f"Error fetching merge requests page {page}: {str(e)}")
+                break
+        
+        logger.info(f"Total merge requests found: {len(all_merge_requests)}")
+        return all_merge_requests 
